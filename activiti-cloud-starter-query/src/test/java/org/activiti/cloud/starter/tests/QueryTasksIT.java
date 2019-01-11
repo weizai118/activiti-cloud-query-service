@@ -21,10 +21,16 @@ import static org.assertj.core.api.Assertions.tuple;
 import static org.awaitility.Awaitility.await;
 
 import java.util.Collection;
+import java.util.Date;
+import java.util.UUID;
 
 import org.activiti.api.process.model.ProcessInstance;
 import org.activiti.api.task.model.Task;
 import org.activiti.api.task.model.impl.TaskImpl;
+import org.activiti.cloud.api.model.shared.events.CloudRuntimeEvent;
+import org.activiti.cloud.api.task.model.impl.events.CloudTaskAssignedEventImpl;
+import org.activiti.cloud.api.task.model.impl.events.CloudTaskCompletedEventImpl;
+import org.activiti.cloud.api.task.model.impl.events.CloudTaskCreatedEventImpl;
 import org.activiti.cloud.api.task.model.impl.events.CloudTaskUpdatedEventImpl;
 import org.activiti.cloud.services.query.app.repository.ProcessInstanceRepository;
 import org.activiti.cloud.services.query.app.repository.TaskCandidateGroupRepository;
@@ -60,8 +66,9 @@ public class QueryTasksIT {
     private static final String TASKS_URL = "/v1/tasks";
     private static final String ADMIN_TASKS_URL = "/admin/v1/tasks";
     
-    private static final ParameterizedTypeReference<PagedResources<Task>> PAGED_TASKS_RESPONSE_TYPE = new ParameterizedTypeReference<PagedResources<Task>>() {
-    };
+    private static final ParameterizedTypeReference<PagedResources<Task>> PAGED_TASKS_RESPONSE_TYPE = new ParameterizedTypeReference<PagedResources<Task>>() {};
+
+    private static final ParameterizedTypeReference<Task> SINGLE_TASK_RESPONSE_TYPE = new ParameterizedTypeReference<Task>() {};
 
     @Autowired
     private KeycloakTokenProducer keycloakTokenProducer;
@@ -385,6 +392,45 @@ public class QueryTasksIT {
         assertCannotSeeTask(taskWithCandidate);
     }
 
+    @Test
+    public void shouldGetCorrectCompletedDateAndDurationWhenCompleted(){
+        //given
+        Date now = new Date(System.currentTimeMillis());
+        Date tomorrow = new Date(System.currentTimeMillis() + 86400000);
+
+        Task completedTask = new TaskImpl(UUID.randomUUID().toString(), "Completed task", Task.TaskStatus.COMPLETED);
+
+        ((TaskImpl)completedTask).setProcessInstanceId(runningProcessInstance.getId());
+        ((TaskImpl) completedTask).setCreatedDate(now);
+
+        //when
+        this.eventsAggregator.addEvents(new CloudTaskCreatedEventImpl("task-created-event-id", now.getTime(),completedTask),
+                new CloudTaskAssignedEventImpl(completedTask),
+                new CloudTaskCompletedEventImpl("task-completed-event-id", tomorrow.getTime(), completedTask));
+        eventsAggregator.sendAll();
+
+        await().untilAsserted(() -> {
+
+            //when
+            ResponseEntity<Task> responseEntity = executeRequestGetTasksById(completedTask.getId());
+
+            //then
+            assertThat(responseEntity).isNotNull();
+            assertThat(responseEntity.getStatusCode()).isEqualTo(HttpStatus.OK);
+
+            assertThat(responseEntity.getBody()).isNotNull();
+            Task task = responseEntity.getBody();
+
+            assertThat(task.getCompletedDate()).isNotNull();
+            assertThat(task.getCompletedDate()).isEqualTo(tomorrow);
+
+            assertThat(task.getDuration()).isEqualTo(tomorrow.getTime() - now.getTime());
+            assertThat(task.getDuration()).isNotNull();
+
+        });
+
+    }
+
     private void assertCannotSeeTask(Task task) {
         await().untilAsserted(() -> {
 
@@ -407,5 +453,12 @@ public class QueryTasksIT {
                                          HttpMethod.GET,
                                          keycloakTokenProducer.entityWithAuthorizationHeader(),
                                          PAGED_TASKS_RESPONSE_TYPE);
+    }
+
+    private ResponseEntity<Task> executeRequestGetTasksById(String id) {
+        return testRestTemplate.exchange(TASKS_URL + "/" + id,
+                HttpMethod.GET,
+                keycloakTokenProducer.entityWithAuthorizationHeader(),
+                SINGLE_TASK_RESPONSE_TYPE);
     }
 }
